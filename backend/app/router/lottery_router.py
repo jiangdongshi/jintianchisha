@@ -61,14 +61,17 @@ def draw_nearby(
     """
     location_str = f"{latitude:.6f},{longitude:.6f}"
 
+    search_info = {"total_hits": 0, "source": ""}
+
     if import_mode == "auto":
         try:
-            items = search_nearby_restaurants(
+            items, info = search_nearby_restaurants(
                 query=keyword,
                 location=location_str,
                 radius=radius_meters,
                 page_size=page_size,
             )
+            search_info = info
         except RuntimeError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
@@ -170,4 +173,5 @@ def draw_nearby(
         "walk_min": walk_min,
         "drive_min": drive_min,
         "pool_size": len(pool),
+        "search_info": search_info,
     }

@@ -15,7 +15,7 @@ export default function MapImport({ onDone }) {
 
   const handleUseMyLocation = () => {
     if (!navigator.geolocation) {
-      setError('浏览器不支持定位');
+      setError('浏览器不支持定位，请手动填写经纬度，或在高德地图 https://lbs.amap.com/tools/picker 点击后复制坐标');
       return;
     }
     navigator.geolocation.getCurrentPosition(
@@ -25,7 +25,25 @@ export default function MapImport({ onDone }) {
         setMode('location');
         setError('');
       },
-      (err) => setError('定位失败：' + err.message)
+      (err) => {
+        // 非 https 或非 localhost 环境下浏览器会拒绝定位请求
+        const isLocal =
+          typeof window !== 'undefined' &&
+          (window.location.hostname === 'localhost' ||
+            window.location.hostname === '127.0.0.1' ||
+            window.location.protocol === 'https:');
+        if (!isLocal) {
+          setError(
+            '定位失败：浏览器的定位 API 仅允许在 HTTPS 或 localhost 下使用。' +
+              '当前是 HTTP + 非本机地址，所以被浏览器拒绝。' +
+              '解决方式：1) 用 http://localhost:5173/ 访问本页面（需要在本机做端口转发），' +
+              '或 2) 手动在下方填写经纬度（可到 https://lbs.amap.com/tools/picker 点选地图复制坐标）。' +
+              '（原错误：' + err.message + '）'
+          );
+        } else {
+          setError('定位失败：' + err.message + '。也可以手动在下方填写经纬度。');
+        }
+      }
     );
   };
 

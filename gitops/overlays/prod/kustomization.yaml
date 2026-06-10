@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+images:
+  - name: IMAGE_PLACEHOLDER_BACKEND
+    newName: hc-test-cn-guangzhou.cr.volces.com/huchao/backend
+    newTag: latest
+  - name: IMAGE_PLACEHOLDER_FRONTEND
+    newName: hc-test-cn-guangzhou.cr.volces.com/huchao/frontend
+    newTag: latest

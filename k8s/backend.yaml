@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: jintianchisha
+  labels:
+    app: backend
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+        - name: backend
+          image: ghcr.io/jiangdongshi/jintianchisha-backend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: jintianchisha-secrets
+          volumeMounts:
+            - name: db-data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      volumes:
+        - name: db-data
+          persistentVolumeClaim:
+            claimName: backend-db-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: jintianchisha
+  labels:
+    app: backend
+spec:
+  selector:
+    app: backend
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backend-db-pvc
+  namespace: jintianchisha
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: standard
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: jintianchisha-secrets
+  namespace: jintianchisha
+type: Opaque
+stringData:
+  DATABASE_URL: sqlite:////data/jintianchisha.db
+  API_PREFIX: /api
+  FEISHU_APP_ID: ""
+  FEISHU_APP_SECRET: ""
+  FEISHU_VERIFICATION_TOKEN: ""
+  FEISHU_ENCRYPT_KEY: ""
+  BAIDU_MAP_AK: ""
+  AMAP_KEY: ""

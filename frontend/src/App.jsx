@@ -38,6 +38,9 @@ function HomePage() {
   const [coords, setCoords] = useState(null);
   const [locError, setLocError] = useState('');
   const [locLoading, setLocLoading] = useState(false);
+  const [showManual, setShowManual] = useState(false);
+  const [manualLat, setManualLat] = useState('');
+  const [manualLng, setManualLng] = useState('');
 
   const [radiusMeters, setRadiusMeters] = useState(500); // 默认 500m
   const [minBudget, setMinBudget] = useState('');
@@ -65,10 +68,34 @@ function HomePage() {
   // 防抖改半径（避免滑块拖动时频繁请求）
   const radiusTimerRef = useRef(null);
 
+  // 判断当前环境是否是"安全来源"（localhost 或 https）
+  const isSecureOrigin = () => {
+    if (typeof window === 'undefined') return true;
+    const hn = window.location.hostname;
+    return (
+      window.location.protocol === 'https:' ||
+      hn === 'localhost' ||
+      hn === '127.0.0.1' ||
+      hn === '[::1]'
+    );
+  };
+
+  const buildLocErrorMsg = (err) => {
+    if (!isSecureOrigin()) {
+      return (
+        '定位失败：浏览器只允许在 HTTPS 或 localhost 下使用定位 API。' +
+        '当前是 HTTP + 非本机地址（' + (typeof window !== 'undefined' ? window.location.host : '') + '），所以被拒绝。' +
+        '解决：1) 用 http://localhost:5173/ 访问；或 2) 用下方的「手动输入坐标」功能（可到 https://lbs.amap.com/tools/picker 点选地图复制坐标）。' +
+        '（原错误：' + (err ? err.message : '') + '）'
+      );
+    }
+    return '定位失败：' + (err ? err.message : '') + '。也可以直接手动输入坐标。';
+  };
+
   // ① 自动定位
   useEffect(() => {
     if (!navigator.geolocation) {
-      setLocError('当前浏览器不支持定位');
+      setLocError('当前浏览器不支持定位，可以使用下方「手动输入坐标」功能');
       return;
     }
     setLocLoading(true);
@@ -78,7 +105,7 @@ function HomePage() {
         setLocLoading(false);
       },
       (err) => {
-        setLocError('定位被拒绝了：' + err.message + '，可点击下面的「手动定位」按钮重新请求');
+        setLocError(buildLocErrorMsg(err));
         setLocLoading(false);
       },
       { enableHighAccuracy: true, timeout: 10000 }
@@ -87,7 +114,10 @@ function HomePage() {
 
   // 手动定位
   const requestLoc = () => {
-    if (!navigator.geolocation) return;
+    if (!navigator.geolocation) {
+      setLocError('当前浏览器不支持定位，请直接手动输入坐标');
+      return;
+    }
     setLocLoading(true);
     setLocError('');
     navigator.geolocation.getCurrentPosition(
@@ -96,7 +126,7 @@ function HomePage() {
         setLocLoading(false);
       },
       (err) => {
-        setLocError('定位失败：' + err.message);
+        setLocError(buildLocErrorMsg(err));
         setLocLoading(false);
       },
       { enableHighAccuracy: true, timeout: 10000 }
@@ -212,17 +242,71 @@ function HomePage() {
       </div>
 
       <div className="loc-panel">
-        <div className="loc-info">
+        <div className="loc-info" style={{ flex: 1 }}>
           {locLoading && <span>⏳ 正在定位...</span>}
           {!locLoading && coords && (
             <span>✅ 已定位：{coords.lat.toFixed(4)}, {coords.lng.toFixed(4)}</span>
           )}
           {!locLoading && !coords && locError && <span className="loc-warn">⚠️ {locError}</span>}
         </div>
-        {coords === null && (
-          <button className="mini-btn" onClick={requestLoc}>手动定位</button>
-        )}
+        <div style={{ display: 'flex', gap: 8 }}>
+          {coords === null && (
+            <button className="mini-btn" onClick={requestLoc}>手动定位</button>
+          )}
+          <button
+            className="mini-btn"
+            onClick={() => setShowManual((v) => !v)}
+            style={{ background: showManual ? '#ffd54f' : '#f5f5f5' }}
+          >
+            {showManual ? '收起' : '⌨️ 手动输入坐标'}
+          </button>
+        </div>
       </div>
+
+      {showManual && (
+        <div className="filter-panel" style={{ marginTop: 12 }}>
+          <p style={{ margin: 0, marginBottom: 8, fontSize: 14, color: '#666' }}>
+            也可以去 <a href="https://lbs.amap.com/tools/picker" target="_blank" rel="noreferrer">高德地图</a> 点选位置，复制经纬度填入下方（纬度在前，经度在后）：
+          </p>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <label style={{ flex: 1 }}>
+              纬度 (lat)
+              <input
+                value={manualLat}
+                onChange={(e) => setManualLat(e.target.value)}
+                placeholder="如 39.915"
+                style={{ marginTop: 4 }}
+              />
+            </label>
+            <label style={{ flex: 1 }}>
+              经度 (lng)
+              <input
+                value={manualLng}
+                onChange={(e) => setManualLng(e.target.value)}
+                placeholder="如 116.404"
+                style={{ marginTop: 4 }}
+              />
+            </label>
+            <button
+              className="btn-primary"
+              style={{ alignSelf: 'flex-end', padding: '8px 12px', whiteSpace: 'nowrap' }}
+              onClick={() => {
+                const lat = Number(manualLat);
+                const lng = Number(manualLng);
+                if (!manualLat || !manualLng || Number.isNaN(lat) || Number.isNaN(lng)) {
+                  setLocError('请输入有效的数字经纬度');
+                  return;
+                }
+                setCoords({ lat, lng });
+                setLocError('');
+                setShowManual(false);
+              }}
+            >
+              ✅ 使用该坐标
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 主卡片：预算 + 范围 + 候选 + 抽签 */}
       <div className="filter-panel">

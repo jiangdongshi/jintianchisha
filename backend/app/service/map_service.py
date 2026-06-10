@@ -56,24 +56,33 @@ def search_nearby_restaurants(
     radius: int = 2000,
     page_size: int = 20,
     page_num: int = 0,
-) -> List[Dict[str, Any]]:
+):
     """
     统一入口：优先用高德（AMAP）搜索附近餐厅；
     - 若高德未配置/返回 0/失败，降级到百度；
-    - 两个都不可用 → 返回友好错误。
+    - 若两个都配置，则同时调用并合并去重（amap+baidu）。
 
-    结果中会带上 source: "amap" / "baidu" / "amap+baidu"。
+    返回: (items_list, info_dict)
+      items_list: 餐厅列表，每个 item 带 source: "amap" / "baidu" / "amap+baidu"
+      info_dict:  {"total_hits": N, "source": "...", "returned": N}
+
+    关键改进：
+      - 使用多关键词搜索，避免单搜"美食"遗漏；
+      - 利用 API 原生 total/count 字段告知"真实命中总数"；
+      - 分页遇到未满页时，再多翻 1 页确认，避免 API 抖动导致数量变化。
     """
     amap_items: List[Dict[str, Any]] = []
+    amap_info: Dict[str, Any] = {"total_hits": 0, "source": "amap", "returned": 0}
     amap_err: Optional[str] = None
 
     baidu_items: List[Dict[str, Any]] = []
+    baidu_info: Dict[str, Any] = {"total_hits": 0, "source": "baidu", "returned": 0}
     baidu_err: Optional[str] = None
 
-    # 1) 优先高德
+    # 1) 高德
     if _has_amap_key():
         try:
-            amap_items = amap_map_service.search_nearby_restaurants(
+            items, info = amap_map_service.search_nearby_restaurants(
                 query=query,
                 region=region,
                 location=location,
@@ -81,22 +90,20 @@ def search_nearby_restaurants(
                 page_size=page_size,
                 page_num=page_num,
             )
-            logger.info(f"[amap] 搜索到 {len(amap_items)} 家餐厅")
+            amap_items = items
+            amap_info = info
+            logger.info(f"[amap] 命中 {info.get('total_hits')}，本次返回 {len(items)} 家餐厅")
         except Exception as e:
             amap_err = f"{type(e).__name__}: {e}"
-            logger.warning(f"[amap] 搜索失败，将降级到百度: {amap_err}")
+            logger.warning(f"[amap] 搜索失败: {amap_err}")
     else:
         amap_err = "未配置 AMAP_KEY"
         logger.info("[amap] 未配置 AMAP_KEY，跳过高德")
 
-    # 2) 高德可用且有结果 → 直接返回（数量随 radius 自然变化）
-    if amap_items:
-        return amap_items
-
-    # 3) 否则尝试百度（补充 / 回退）
+    # 2) 百度（无论高德是否有结果都尝试，用于交叉补充）
     if _has_baidu_ak():
         try:
-            baidu_items = baidu_map_service.search_nearby_restaurants(
+            items, info = baidu_map_service.search_nearby_restaurants(
                 query=query,
                 region=region,
                 location=location,
@@ -104,7 +111,9 @@ def search_nearby_restaurants(
                 page_size=page_size,
                 page_num=page_num,
             )
-            logger.info(f"[baidu] 搜索到 {len(baidu_items)} 家餐厅")
+            baidu_items = items
+            baidu_info = info
+            logger.info(f"[baidu] 命中 {info.get('total_hits')}，本次返回 {len(items)} 家餐厅")
         except Exception as e:
             baidu_err = f"{type(e).__name__}: {e}"
             logger.warning(f"[baidu] 搜索失败: {baidu_err}")
@@ -112,11 +121,28 @@ def search_nearby_restaurants(
         baidu_err = "未配置 BAIDU_MAP_AK"
         logger.info("[baidu] 未配置 BAIDU_MAP_AK，跳过百度")
 
-    # 4) 百度有结果就返回
-    if baidu_items:
-        return baidu_items
+    # 3) 合并 & 去重（两个数据源都有结果时）
+    merged_items: List[Dict[str, Any]] = []
+    if amap_items and baidu_items:
+        merged_items = _dedupe(amap_items, baidu_items)
+        info = {
+            "total_hits": max(amap_info.get("total_hits", 0), baidu_info.get("total_hits", 0)),
+            "source": "amap+baidu",
+            "returned": len(merged_items),
+            "amap_total": amap_info.get("total_hits", 0),
+            "baidu_total": baidu_info.get("total_hits", 0),
+        }
+        return merged_items, info
 
-    # 5) 两者都失败 / 都没结果
+    # 4) 只有高德有结果
+    if amap_items:
+        return amap_items, amap_info
+
+    # 5) 只有百度有结果
+    if baidu_items:
+        return baidu_items, baidu_info
+
+    # 6) 两者都失败 / 都没结果
     reasons = []
     if amap_err:
         reasons.append(f"高德: {amap_err}")

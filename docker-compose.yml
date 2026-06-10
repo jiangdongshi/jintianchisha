@@ -1,0 +1,51 @@
+services:
+  backend:
+    image: ghcr.io/${GITHUB_REPOSITORY_OWNER:-jiangdongshi}/jintianchisha-backend:${TAG:-latest}
+    container_name: jintianchisha-backend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      DATABASE_URL: sqlite:////data/jintianchisha.db
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      FEISHU_VERIFICATION_TOKEN: ${FEISHU_VERIFICATION_TOKEN:-}
+      FEISHU_ENCRYPT_KEY: ${FEISHU_ENCRYPT_KEY:-}
+      BAIDU_MAP_AK: ${BAIDU_MAP_AK:-}
+      AMAP_KEY: ${AMAP_KEY:-}
+      API_PREFIX: /api
+    volumes:
+      - db-data:/data
+    networks:
+      - jintianchisha-net
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    image: ghcr.io/${GITHUB_REPOSITORY_OWNER:-jiangdongshi}/jintianchisha-frontend:${TAG:-latest}
+    container_name: jintianchisha-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - jintianchisha-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  db-data:
+    driver: local
+
+networks:
+  jintianchisha-net:
+    driver: bridge

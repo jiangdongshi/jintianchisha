@@ -138,7 +138,11 @@ def _fetch_one_page(
     radius: int,
     page_size: int,
     page_num: int,                # 从 1 开始
-) -> List[Dict[str, Any]]:
+):
+    """
+    返回 (pois_list, total_hits)。
+    total_hits 来自高德 API 的 "count" 字段，代表该关键词在搜索范围内的真实命中总数。
+    """
     params = {
         "key": key,
         "keywords": keywords,
@@ -155,7 +159,13 @@ def _fetch_one_page(
         raise RuntimeError(
             f"高德地图 API 错误 status={status}, info={data.get('info')}, infocode={data.get('infocode')}"
         )
-    return data.get("pois") or []
+    pois = data.get("pois") or []
+    count_raw = data.get("count")
+    try:
+        total_hits = int(count_raw) if count_raw not in (None, "", "0") else len(pois)
+    except (ValueError, TypeError):
+        total_hits = len(pois)
+    return pois, total_hits
 
 
 def _parse_pois(pois: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -224,6 +234,64 @@ def _parse_pois(pois: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def _search_one_keyword(
+    key: str,
+    kw: str,
+    location_str: str,
+    radius: int,
+    ps: int,
+    seen: Dict[str, Dict[str, Any]],
+) -> int:
+    """
+    单个关键词翻页搜索，结果写入 seen（name|address 去重）。
+    返回该关键词的 API count 报告值（真实命中总数）。
+    翻页终止条件：到达 SAFETY_CAP，或「连续 2 页都不满一页」。
+    """
+    total_hits = 0
+    page_idx = 1
+    undersized_streak = 0
+
+    while True:
+        try:
+            page, page_count = _fetch_one_page(
+                key=key,
+                keywords=kw,
+                location_str=location_str,
+                radius=radius,
+                page_size=ps,
+                page_num=page_idx,
+            )
+        except RuntimeError as e:
+            if page_idx == 1:
+                raise e
+            break
+
+        if page_idx == 1:
+            total_hits = page_count
+
+        if not page:
+            break
+
+        for item in _parse_pois(page):
+            key_str = item["name"] + "|" + str(item.get("address") or "")
+            if key_str not in seen:
+                seen[key_str] = item
+
+        if len(seen) >= SAFETY_CAP:
+            break
+
+        if len(page) < ps:
+            undersized_streak += 1
+            if undersized_streak >= 2:
+                break
+        else:
+            undersized_streak = 0
+
+        page_idx += 1
+
+    return total_hits
+
+
 def search_nearby_restaurants(
     query: str = "美食",
     region: Optional[str] = None,
@@ -231,19 +299,25 @@ def search_nearby_restaurants(
     radius: int = 2000,
     page_size: int = 25,
     page_num: int = 0,
-) -> List[Dict[str, Any]]:
+):
     """
-    按坐标搜索周边餐厅（高德地图）：
+    按坐标搜索周边餐厅（高德地图），返回 (items, info_dict)。
+    改进：
       1. 坐标 WGS-84 → GCJ-02 转换；
-      2. 用单一关键词（默认"美食"）按顺序翻页，让数量自然随 radius 变化；
-      3. 按 "名称+地址" 去重，按评分降序；
-      4. 最多返回 MAX_RESULTS 家。
+      2. 用多个关键词（美食/火锅/烧烤/快餐/小吃/西餐/日料/面条/奶茶/咖啡）覆盖更多餐厅类型；
+      3. 每个关键词连续翻页，直到「连续 2 页都不满」才停止，避免 API 抖动提前终止；
+      4. 利用高德 API 的 count 字段展示"真实命中总数"。
+
+    info_dict 包含:
+      - total_hits: 所有关键词 API 返回的命中总数之和
+      - source: "amap"
+      - keywords: 使用的关键词列表
 
     参数:
       - location: "纬度,经度"（内部会转换成 lng,lat 给高德）
       - radius: 搜索半径（米），100~50000
       - page_size: 1~25
-      - query: 关键词（默认 美食）
+      - query: 附加关键词（会加入到关键词列表一起搜索）
     """
     key = _get_key()
     if not key:
@@ -265,37 +339,34 @@ def search_nearby_restaurants(
     if not location_str:
         raise RuntimeError("location 格式错误，必须是 \"纬度,经度\"，例如 39.915,116.404")
 
-    # 2) 单一关键词按页码翻页，直到 API 返回未满一页或达到 safety_cap
-    kw = (query or "美食").strip() or "美食"
+    # 2) 多关键词覆盖搜索
+    kws: List[str] = []
+    user_kw = (query or "").strip()
+    if user_kw and user_kw not in ("美食",):
+        kws.append(user_kw)
+    for k in DEFAULT_KEYWORDS:
+        if k not in kws:
+            kws.append(k)
+
     seen: Dict[str, Dict[str, Any]] = {}
     ps = max(10, min(25, page_size))  # 高德每页最大 25
+    radius_cap = min(radius, 50000)
 
-    page_idx = 1
-    while True:
+    total_hits = 0
+    for kw in kws:
         try:
-            page = _fetch_one_page(
+            hits = _search_one_keyword(
                 key=key,
-                keywords=kw,
+                kw=kw,
                 location_str=location_str,
-                radius=radius,
-                page_size=ps,
-                page_num=page_idx,
+                radius=radius_cap,
+                ps=ps,
+                seen=seen,
             )
-        except RuntimeError as e:
-            if page_idx == 1:
-                raise e
-            break
-        if not page:
-            break
-        for item in _parse_pois(page):
-            key_str = item["name"] + "|" + str(item.get("address") or "")
-            if key_str not in seen:
-                seen[key_str] = item
-        if len(seen) >= SAFETY_CAP:
-            break
-        if len(page) < ps:
-            break
-        page_idx += 1
+            total_hits += hits
+        except RuntimeError:
+            # 单个关键词出错不影响其他关键词
+            continue
 
     # 3) 排序：评分降序，有价格信息优先
     all_items = list(seen.values())
@@ -305,4 +376,12 @@ def search_nearby_restaurants(
             0 if (x.get("price") is not None and x.get("price") != "") else 1,
         )
     )
-    return all_items
+
+    info = {
+        "total_hits": total_hits,
+        "source": "amap",
+        "keywords": kws,
+        "returned": len(all_items),
+    }
+
+    return all_items, info

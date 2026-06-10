@@ -10,10 +10,16 @@ from app.config import settings
 BAIDU_PLACE_URL = "https://api.map.baidu.com/place/v2/search"
 
 # 搜索策略：
-#   用一个关键词（默认"美食"）按顺序翻页，真实范围内有多少家就返回多少家。
-#   每页最大 20 条，持续翻页直到 API 返回未满一页或到达 safety_cap（默认 1000）。
-#   按 "名称+地址" 去重后返回，按评分降序。
+#   用多个关键词（"美食"/"火锅"/"烧烤"…）分别翻页搜索，结果合并后按 (name, address) 去重。
+#   每页最大 20 条，持续翻页直到「连续 2 页都未满」或到达 safety_cap。
+#   同时记录每个关键词 API 返回的 total 字段，用于展示"真实命中总数"。
 SAFETY_CAP = 1000
+
+# 多关键词覆盖更多餐厅类型 —— 单搜"美食"会遗漏部分不被归类为"美食"的店（咖啡/面馆/小吃等）
+DEFAULT_KEYWORDS = [
+    "美食", "火锅", "烧烤", "川菜", "日料",
+    "快餐", "小吃", "西餐", "面条", "奶茶", "咖啡",
+]
 
 
 def _get_ak() -> str:
@@ -99,7 +105,12 @@ def _fetch_one_page(
     radius: int,
     page_size: int,
     page_num: int,
-) -> List[Dict[str, Any]]:
+) -> (List[Dict[str, Any]], int):
+    """
+    返回 (results_list, total_hits)。
+    total_hits 来自百度 API 返回的 "total" 字段，代表该关键词在搜索范围内的真实命中总数，
+    用来向用户展示"实际有多少家"，不代表最终返回数。
+    """
     params = {
         "query": query,
         "tag": "美食",
@@ -117,7 +128,14 @@ def _fetch_one_page(
         raise RuntimeError(
             f"百度地图 API 错误 status={status}, message={data.get('message')}"
         )
-    return data.get("results") or []
+    results = data.get("results") or []
+    # 百度 API 会返回 "total": 命中总数（字符串或数字）
+    total_raw = data.get("total")
+    try:
+        total_hits = int(total_raw) if total_raw is not None else len(results)
+    except (ValueError, TypeError):
+        total_hits = len(results)
+    return results, total_hits
 
 
 def _parse_price(val) -> Optional[int]:
@@ -176,6 +194,65 @@ def _parse_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def _search_one_keyword(
+    ak: str,
+    kw: str,
+    location_str: str,
+    radius: int,
+    ps: int,
+    seen: Dict[str, Dict[str, Any]],
+) -> int:
+    """
+    用单个关键词翻页搜索，结果写入 seen（按 name|address 去重）。
+    返回该关键词的 API 报告 total_hits（用于展示"真实总量"）。
+    翻页终止条件：到达 SAFETY_CAP，或「连续 2 页都不满一页」。
+    """
+    total_hits = 0
+    page_idx = 0
+    undersized_streak = 0  # 连续不满一页的次数
+
+    while True:
+        try:
+            page, page_total = _fetch_one_page(
+                ak=ak,
+                query=kw,
+                location_str=location_str,
+                radius=radius,
+                page_size=ps,
+                page_num=page_idx,
+            )
+        except RuntimeError as e:
+            if page_idx == 0:
+                raise e
+            break
+
+        if page_idx == 0:
+            total_hits = page_total
+
+        if not page:
+            break
+
+        for item in _parse_results(page):
+            key_str = item["name"] + "|" + str(item.get("address") or "")
+            if key_str not in seen:
+                seen[key_str] = item
+
+        if len(seen) >= SAFETY_CAP:
+            break
+
+        if len(page) < ps:
+            undersized_streak += 1
+            # 只连续 1 页不满的话，可能是 API 抖动，多翻一页确认真的到尾了
+            if undersized_streak >= 2:
+                break
+        else:
+            undersized_streak = 0
+
+        page_idx += 1
+
+    return total_hits
+
+
 def search_nearby_restaurants(
     query: str = "美食",
     region: Optional[str] = None,
@@ -183,18 +260,24 @@ def search_nearby_restaurants(
     radius: int = 2000,
     page_size: int = 20,
     page_num: int = 0,
-) -> List[Dict[str, Any]]:
+):
     """
-    按坐标搜索周边餐厅（百度地图）：
+    按坐标搜索周边餐厅（百度地图），返回 (items, info_dict)。
+    改进：
       1. 坐标 WGS-84 → BD-09 转换；
-      2. 用单一关键词（默认"美食"）按顺序翻页，真实范围内有多少家就返回多少；
-      3. 按 "名称+地址" 去重，按评分降序。
+      2. 用多个关键词（美食/火锅/烧烤/…）覆盖更多餐厅类型，避免单搜"美食"漏店；
+      3. 每个关键词连续翻页，直到「连续 2 页都不满」才停止，避免 API 抖动提前终止；
+      4. 按 "名称+地址" 去重，按评分降序。
+
+    info_dict 包含:
+      - total_hits: 所有关键词 API 返回的命中总数之和（展示"真实总量"）
+      - source: "baidu"
 
     参数:
       - location: "纬度,经度"
       - radius: 搜索半径（米），100~50000
       - page_size: 1~20（单页数量）
-      - query: 关键词（默认 美食）
+      - query: 附加关键词（会加入到关键词列表一起搜索）
     """
     ak = _get_ak()
     if not ak:
@@ -212,37 +295,34 @@ def search_nearby_restaurants(
         except (ValueError, TypeError):
             location_str = location
 
-    # 2) 单一关键词按页码翻页，直到 API 返回未满一页或达到 safety_cap
-    kw = (query or "美食").strip() or "美食"
-    seen: Dict[str, Dict[str, Any]] = {}
-    ps = max(10, min(20, page_size))  # 百度每页最大 20
+    # 2) 构造关键词列表：用户提供的 query + 内置 DEFAULT_KEYWORDS，去重
+    kws: List[str] = []
+    user_kw = (query or "").strip()
+    if user_kw and user_kw not in ("美食",):
+        kws.append(user_kw)
+    for k in DEFAULT_KEYWORDS:
+        if k not in kws:
+            kws.append(k)
 
-    page_idx = 0
-    while True:
+    seen: Dict[str, Dict[str, Any]] = {}
+    ps = max(10, min(20, page_size))
+    radius_cap = min(radius, 50000)
+
+    total_hits = 0
+    for kw in kws:
         try:
-            page = _fetch_one_page(
+            hits = _search_one_keyword(
                 ak=ak,
-                query=kw,
+                kw=kw,
                 location_str=location_str,
-                radius=min(radius, 50000),
-                page_size=ps,
-                page_num=page_idx,
+                radius=radius_cap,
+                ps=ps,
+                seen=seen,
             )
-        except RuntimeError as e:
-            if page_idx == 0:
-                raise e
-            break
-        if not page:
-            break
-        for item in _parse_results(page):
-            key_str = item["name"] + "|" + str(item.get("address") or "")
-            if key_str not in seen:
-                seen[key_str] = item
-        if len(seen) >= SAFETY_CAP:
-            break
-        if len(page) < ps:
-            break
-        page_idx += 1
+            total_hits += hits
+        except RuntimeError:
+            # 单个关键词出错不影响其他关键词继续搜索
+            continue
 
     # 3) 排序：评分降序，有价格信息优先
     all_items = list(seen.values())
@@ -253,7 +333,18 @@ def search_nearby_restaurants(
         )
     )
 
-    return all_items
+    # 给每个 item 标 source
+    for item in all_items:
+        item["source"] = "baidu"
+
+    info = {
+        "total_hits": total_hits,
+        "source": "baidu",
+        "keywords": kws,
+        "returned": len(all_items),
+    }
+
+    return all_items, info
 
 
 def _parse_rating(val) -> Optional[int]:

@@ -35,7 +35,7 @@ def import_from_map(
         raise HTTPException(status_code=400, detail="location 格式错误，必须是 \"纬度,经度\"")
 
     try:
-        items = search_nearby_restaurants(
+        items, info = search_nearby_restaurants(
             query=query,
             region=None,
             location=location,
@@ -74,6 +74,8 @@ def import_from_map(
 
     return {
         "count": len(items),
+        "total_hits": info.get("total_hits", len(items)),
+        "source": info.get("source", "map"),
         "saved": len(saved_ids),
         "deleted": deleted,
         "saved_ids": saved_ids,

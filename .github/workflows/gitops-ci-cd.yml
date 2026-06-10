@@ -1,0 +1,131 @@
+name: CI / CD (GitOps)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'gitops/**'
+      - '.github/workflows/gitops-ci-cd.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: '部署环境'
+        required: true
+        default: 'prod'
+        type: choice
+        options:
+          - prod
+
+env:
+  REGISTRY: hc-test-cn-guangzhou.cr.volces.com
+  IMAGE_REPO: huchao
+  KUSTOMIZE_PATH: gitops/overlays/prod
+
+jobs:
+  build-and-push:
+    name: 构建 & 推送镜像
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录到火山引擎 CR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.VOLCENGINE_CR_USERNAME }}
+          password: ${{ secrets.VOLCENGINE_CR_PASSWORD }}
+
+      - name: 生成镜像版本号
+        id: meta
+        run: |
+          VERSION="sha-${GITHUB_SHA::7}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "使用版本号: ${VERSION}"
+
+      - name: 构建并推送后端镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/backend:${{ steps.meta.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/backend:latest
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+
+      - name: 构建并推送前端镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/frontend:${{ steps.meta.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/frontend:latest
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max
+
+  update-and-deploy:
+    name: 更新 GitOps 配置并部署到 k3s
+    needs: build-and-push
+    runs-on: self-hosted
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 更新 Kustomize 中的镜像 tag
+        run: |
+          TAG=${{ needs.build-and-push.outputs.image_tag }}
+          KUSTOMIZE_FILE="${{ env.KUSTOMIZE_PATH }}/kustomization.yaml"
+          echo "更新 ${KUSTOMIZE_FILE} 中的镜像 tag 为: ${TAG}"
+          # 更新 backend newTag
+          sed -i "/IMAGE_PLACEHOLDER_BACKEND/,/newTag/ s|newTag: .*|newTag: ${TAG}|" "${KUSTOMIZE_FILE}"
+          # 更新 frontend newTag
+          sed -i "/IMAGE_PLACEHOLDER_FRONTEND/,/newTag/ s|newTag: .*|newTag: ${TAG}|" "${KUSTOMIZE_FILE}"
+          echo "=== 更新后的 Kustomize ==="
+          cat "${KUSTOMIZE_FILE}"
+
+      - name: Commit & Push GitOps 更新到 Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          TAG=${{ needs.build-and-push.outputs.image_tag }}
+          git add "${{ env.KUSTOMIZE_PATH }}/kustomization.yaml"
+          if git diff --cached --quiet; then
+            echo "没有变更需要提交"
+          else
+            git commit -m "chore(gitops): update images to ${TAG}"
+            git push
+            echo "GitOps 配置已更新"
+          fi
+
+      - name: 部署到 k3s 集群
+        run: |
+          echo "=== 部署 GitOps 配置到 k3s 集群 ==="
+          kubectl apply -k gitops/overlays/prod
+          echo ""
+          echo "=== 部署状态 ==="
+          kubectl get deployments -n jintianchisha
+          kubectl rollout status deployment/backend -n jintianchisha --timeout=300s
+          kubectl rollout status deployment/frontend -n jintianchisha --timeout=300s
+          echo ""
+          echo "=== Pod 状态 ==="
+          kubectl get pods -n jintianchisha
+          echo ""
+          echo "=== Ingress 状态 ==="
+          kubectl get ingress -n jintianchisha
+          echo ""
+          echo "=== 当前镜像版本 ==="
+          kubectl get deployment -n jintianchisha -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.template.spec.containers[0].image}{"\n"}{end}'
+          echo ""
+          echo "✅ 部署完成！"
