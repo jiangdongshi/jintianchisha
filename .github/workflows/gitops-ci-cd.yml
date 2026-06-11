@@ -1,4 +1,4 @@
-name: CI / CD (GitOps) # v6
+name: CI / CD (GitOps) # v7
 
 on:
   push:
@@ -12,17 +12,29 @@ on:
   workflow_dispatch:
 
 env:
-  REGISTRY: swr.cn-east-3.myhuaweicloud.com
+  REGISTRY: swr.cn-north-4.myhuaweicloud.com
   IMAGE_REPO: jintianchisha
   KUSTOMIZE_PATH: gitops/overlays/prod
 
 jobs:
-  build-and-deploy:
-    name: 构建镜像 & 部署到 k3s
-    runs-on: self-hosted
+  build-and-push:
+    name: 构建镜像 & 推送华为云 SWR
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
     steps:
       - name: Checkout 代码
         uses: actions/checkout@v4
+
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录到华为云 SWR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.HUAWEICLOUD_SWR_USERNAME }}
+          password: ${{ secrets.HUAWEICLOUD_SWR_PASSWORD }}
 
       - name: 生成镜像版本号
         id: meta
@@ -31,38 +43,37 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "使用版本号: ${VERSION}"
 
-      - name: 登录到华为云 SWR（nerdctl）
-        run: |
-          echo "${{ secrets.HUAWEICLOUD_SWR_PASSWORD }}" | nerdctl login ${{ env.REGISTRY }} \
-            -u "${{ secrets.HUAWEICLOUD_SWR_USERNAME }}" --password-stdin
-
       - name: 构建并推送后端镜像
-        run: |
-          TAG=${{ steps.meta.outputs.version }}
-          echo "=== 构建 backend:${TAG} ==="
-          nerdctl build \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/backend:${TAG} \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/backend:latest \
-            ./backend
-          echo "=== 推送 backend:${TAG} ==="
-          nerdctl push ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/backend:${TAG}
-          nerdctl push ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/backend:latest
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/backend:${{ steps.meta.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/backend:latest
 
       - name: 构建并推送前端镜像
-        run: |
-          TAG=${{ steps.meta.outputs.version }}
-          echo "=== 构建 frontend:${TAG} ==="
-          nerdctl build \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/frontend:${TAG} \
-            -t ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/frontend:latest \
-            ./frontend
-          echo "=== 推送 frontend:${TAG} ==="
-          nerdctl push ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/frontend:${TAG}
-          nerdctl push ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/frontend:latest
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/frontend:${{ steps.meta.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/frontend:latest
+
+  deploy:
+    name: 部署到 k3s 集群
+    needs: build-and-push
+    runs-on: self-hosted
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
 
       - name: 更新 Kustomize 中的镜像 tag
         run: |
-          TAG=${{ steps.meta.outputs.version }}
+          TAG=${{ needs.build-and-push.outputs.image_tag }}
           KUSTOMIZE_FILE="${{ env.KUSTOMIZE_PATH }}/kustomization.yaml"
           echo "更新 ${KUSTOMIZE_FILE} 中的镜像 tag 为: ${TAG}"
           sed -i "/IMAGE_PLACEHOLDER_BACKEND/,/newTag/ s|newTag: .*|newTag: ${TAG}|" "${KUSTOMIZE_FILE}"
@@ -72,7 +83,7 @@ jobs:
 
       - name: 部署到 k3s 集群
         run: |
-          TAG=${{ steps.meta.outputs.version }}
+          TAG=${{ needs.build-and-push.outputs.image_tag }}
           echo "=== 部署 GitOps 配置到 k3s 集群（版本: ${TAG}） ==="
           kubectl apply -k gitops/overlays/prod
           echo ""
@@ -80,7 +91,7 @@ jobs:
           kubectl rollout status deployment/backend -n jintianchisha --timeout=300s
           kubectl rollout status deployment/frontend -n jintianchisha --timeout=300s
           echo ""
-          echo "=== 当前状态 ==="
+          echo "=== 部署结果 ==="
           kubectl get deployments -n jintianchisha
           echo ""
           kubectl get pods -n jintianchisha

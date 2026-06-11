@@ -4,8 +4,8 @@ resources:
   - ../../base
 images:
   - name: IMAGE_PLACEHOLDER_BACKEND
-    newName: hc-test-cn-guangzhou.cr.volces.com/huchao/backend
+    newName: swr.cn-north-4.myhuaweicloud.com/jintianchisha/backend
     newTag: latest
   - name: IMAGE_PLACEHOLDER_FRONTEND
-    newName: hc-test-cn-guangzhou.cr.volces.com/huchao/frontend
+    newName: swr.cn-north-4.myhuaweicloud.com/jintianchisha/frontend
     newTag: latest
