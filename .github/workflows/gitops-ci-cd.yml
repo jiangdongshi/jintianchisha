@@ -1,4 +1,4 @@
-name: CI / CD (GitOps) # v7
+name: CI / CD (GitOps) # v8
 
 on:
   push:
@@ -49,6 +49,7 @@ jobs:
           context: backend
           file: backend/Dockerfile
           push: true
+          provenance: false
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/backend:${{ steps.meta.outputs.version }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/backend:latest
@@ -59,6 +60,7 @@ jobs:
           context: frontend
           file: frontend/Dockerfile
           push: true
+          provenance: false
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/frontend:${{ steps.meta.outputs.version }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_REPO }}/frontend:latest
