@@ -1,4 +1,4 @@
-name: CI / CD (GitOps)
+name: CI / CD (GitOps) # v1
 
 on:
   push:
