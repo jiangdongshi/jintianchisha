@@ -1,4 +1,4 @@
-name: CI / CD (GitOps) # v2
+name: CI / CD (GitOps) # v4
 
 on:
   push:
@@ -20,8 +20,8 @@ on:
           - prod
 
 env:
-  REGISTRY: hc-test-cn-guangzhou.cr.volces.com
-  IMAGE_REPO: huchao
+  REGISTRY: swr.cn-east-3.myhuaweicloud.com
+  IMAGE_REPO: jintianchisha
   KUSTOMIZE_PATH: gitops/overlays/prod
 
 jobs:
@@ -37,12 +37,12 @@ jobs:
       - name: 设置 Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: 登录到火山引擎 CR
+      - name: 登录到华为云 SWR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.VOLCENGINE_CR_USERNAME }}
-          password: ${{ secrets.VOLCENGINE_CR_PASSWORD }}
+          username: ${{ secrets.HUAWEICLOUD_SWR_USERNAME }}
+          password: ${{ secrets.HUAWEICLOUD_SWR_PASSWORD }}
 
       - name: 生成镜像版本号
         id: meta
